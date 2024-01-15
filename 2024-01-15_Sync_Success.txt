@@ -1,0 +1,18 @@
+***Starting Sync***
+Sync started at: 2024-01-15 15:33:38
+
+Current AD Group Members: 3
+Current TDXGroup Members: 3
+
+No users to remove from TDX group.
+No users to add to TDX group.
+
+
+***Validating Sync***
+
+Post Sync Number of Users to remove from TDX: 0
+Post Sync Number of Users to Add to TDX Group: 0
+
+Success: No users to remove or add to TDX group.
+
+Sync ended at: 2024-01-15 15:33:42

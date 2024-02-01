@@ -1,10 +1,14 @@
+Processing AD group: ADGROUPNAME with TDX GROUP ID: 1234
+
 ***Starting Sync***
-Sync started at: 2024-01-15 15:33:38
 
-Current AD Group Members: 3
-Current TDXGroup Members: 3
+Sync started at: 2024-02-01 12:09:17
 
-No users to remove from TDX group.
+Current AD Group Members: 1
+Current TDXGroup Members: 2
+
+Number of Users to remove from TDX: 1
+JohnDoe@domain.com
 No users to add to TDX group.
 
 
@@ -15,4 +19,4 @@ Post Sync Number of Users to Add to TDX Group: 0
 
 Success: No users to remove or add to TDX group.
 
-Sync ended at: 2024-01-15 15:33:42
+Sync ended at: 2024-02-01 12:09:20

@@ -1,352 +1,459 @@
-<# 
-TDX_ADGroupSync.ps1 Overview
+<# TDX_ADGroupSync.ps1 Overview
 
-    This script's primary function is to synchronize members between an Active Directory group and a TeamDynamics (TDX) group. It operates as follows:
+    Purpose:
+    This PowerShell script automates the synchronization of user memberships between an Active Directory (AD) group and a TeamDynamics (TDX) group. It ensures that the memberships in both systems are consistent.
 
-    1. Retrieves members from the Active Directory group specified by $GroupName (see line 55).
-    2. Fetches members from the TDX group identified by $groupid (see line 98).
-    3. Compares the two lists of members and identifies discrepancies.
-    4. If a member is in the AD group but not in the TDX group, they are added to the $Add2TDX variable. Conversely, if a member is in the TDX group but not in the AD group, they are added to the $RemoveFrom variable.
+    Key Processes:
+    1. Member Retrieval: Extracts member lists from both AD and TDX groups.
+    2. Comparison: Identifies discrepancies between the two member lists.
+    3. Synchronization Actions: Based on the comparison, it determines members to add to or remove from the TDX group.
+    4. UID Handling: Fetches User IDs (UIDs) from TDX for synchronization actions since TDX API requires UIDs.
+    5. Update TDX Group: Executes API calls to add or remove members in the TDX group as needed.
+    6. Validation and Logging: After the synchronization, the script validates the results and logs the process. Logs are named based on the synchronization status (success or failure).
 
-    The UIDFetch function then takes these variables and fetches the corresponding UIDs (User IDs) from TDX using the primary email as the username. These UIDs are stored in either $UIDAddArray or $UIDRemoveArray. This step is necessary because the TDX API requires UIDs for adding or removing members.
+    Error Handling:
+    The script includes robust error-catching mechanisms to log any issues during the synchronization process.
 
-    Special formatting is required if there's only a single UID in the array (refer to the if-statement on lines 168-174 for an example).
+    Email Notifications:
+    In case of a sync failure, an email alert is sent with the log file attached for further analysis.
 
-    Post-main function of the script, the script validates the success of the synchronization:
-    
-    - The TestSync function ensures a clean run by clearing out variables and rerunning the ADPull, TDXPull, and Sorting functions.
-    - It then checks the count of $UIDAddArray and $UIDRemoveArray. If these counts are not zero, it indicates that the sync was unsuccessful, and the script logs the remaining discrepancies.
-    - The script includes error-catching mechanisms within the logging system for process failure detection.
+    Usage:
+    The script iterates through each row in a CSV file to process multiple groups. Variables such as group names and IDs are defined in the CSV.
 
-    The log file is named "(time)_Sync_Success" or "(time)_Sync_Failure", based on the $syncStatus variable.
-    This variable is set to $true only if the counts of the arrays ($UIDAddArray and $UIDRemoveArray) are both zero, indicating a successful synchronization.
+    Customization:
+    - Logging paths, CSV file path, SMTP server details, and email addresses for notifications are configurable.
 #>
-# Define the directory path for logs
-# Update these paths to your desired log file location
-$logDirPath = "C:\temp\TDXsync"
-$logFileName = "Sync_Log.txt"
-Initialize-Logging -LogDirPath $logDirPath -LogFileName $logFileName
 
-# Function to initialize logging
-function Initialize-Logging {
-    param(
-        [string]$LogDirPath,
-        [string]$LogFileName
-    )
-    New-Item -ItemType Directory -Path $LogDirPath -Force | Out-Null
-    $script:logFilePath = Join-Path $LogDirPath $LogFileName
-    $startTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Log "***Starting Sync***"
-    Write-Log "Sync started at: $startTimestamp"
-    Write-Log ""
-}
+#region Defining Variables
+    # Define the directory path for logs
+        $logDirPath = "TDXsync"
+        $logFileName = "Sync_Log.txt"
+        $script:logFilePath = Join-Path $LogDirPath $LogFileName
+#endregion
+
+#region Importing UID's through CSV
+    # Define the path to your CSV file
+        $csvPath = "TDXsync\Groups.csv"
+    # Import the CSV file
+        $csvData = Import-Csv -Path $csvPath
+#endregion
+
+#region Functions
 
 # Function to write a log entry
-function Write-Log {
+    function Write-Log {
     param(
-        [string]$Message
-    )
-    Add-Content -Path $script:logFilePath -Value "$Message"
-}
-
-# Update needed within this function
-function ADPull {
-    # Update this with the desired group
-    param([string]$global:GroupName = 'TDX-Test-Lucas')
-
-    # Fetch the AD Group and members within
-    $Group = Get-ADGroup -Identity $GroupName -Properties *
-    if ($Group -ne $null) {
-        $GroupMembers = Get-ADGroupMember -Identity $Group
-        $ADMemberarray = @()
-        foreach ($Member in $GroupMembers) {
-            $ADMembers = $Member.name + "@cmich.edu"
-            $ADMemberarray += $ADMembers
-        }
-        return $ADMemberarray
-    } else {
-        Write-Log "Group '$GroupName' not found."
-        return @()
+            [string]$Message
+        )
+        Add-Content -Path $script:logFilePath -Value "$Message"
     }
-}
 
-# Updates needed within this function
-function TdxPull {
-    # API Call to TDX for Group Membership
-    # This is currently pointed at the SB
-    $global:baseuri = "https://apiLink.com/apiConnector"
-    $authurl = $baseuri + "api/auth/loginadmin"
-
-    # Currently using LM-API Test API account for this test, be sure to update for Prod.
-    $body = New-Object -TypeName psobject -Property @{
-        BEID="ID" 
-        WebServicesKey="Key"
-    } | Convertto-Json -Depth 2
-
-    $authResponse = Invoke-RestMethod -Uri $authurl -Method Post -Body $body -ContentType "application/json"
-
-    $bearerToken = $authResponse
-
-     # Headers must be set as global
-    $global:headers = @{
-        "Content-Type" = "application/json"
-        "Accept" = "application/json"
-        "Authorization" = "Bearer " + $bearerToken
-        }
-    # Update this to the desired TDX Group, currently this is group TDXGroup-Test-Lucas
-    # groupid must be set as global
-    $global:groupid = '####'
-
-    $memberuri = $baseuri + "api/groups/$groupid/members"
-
-    $TDXResult = Invoke-RestMethod -Uri $memberuri -Method Get -Headers $headers
-    $tdxusers = $TDXResult | ForEach-Object { $_.Username }
-
-    return $tdxusers
-}
-
-function Sorting {
+# Function to initialize logging
+    function Initialize-Logging {
         param(
-        [Parameter(Mandatory)]
-        [array]$tdxusers,
-        [Parameter(Mandatory)]
-        [array]$ADMemberarray
-    )
-    $differences = $null
-    $RemoveFrom = $null
-    $Add2TDX = $null
-    # Comparing the results
-    $differences = Compare-Object -ReferenceObject $tdxusers -DifferenceObject $ADMemberarray
-    
-    # Determine who needs to be removed from the TDX group
-    $RemoveFrom = $differences | Where-Object { $_.SideIndicator -eq '<=' } | Select-Object -ExpandProperty InputObject
+            [string]$LogDirPath,
+            [string]$LogFileName
+        )
+        New-Item -ItemType Directory -Path $LogDirPath -Force | Out-Null
 
-    # Determine who needs to be added to the TDX group
-    $Add2TDX = $differences | Where-Object { $_.SideIndicator -eq '=>' } | Select-Object -ExpandProperty InputObject
-    
-    # Return the lists
-    return @{
-        RemoveFrom = $RemoveFrom
-        Add2TDX = $Add2TDX
+        $startTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Write-Log ""
+        Write-Log "***Starting Sync***"
+        Write-Log ""
+        Write-Log "Sync started at: $startTimestamp"
+        Write-Log ""
     }
-}
+# Call to ActiveDirctory to fetch group members
+    function ADPull {
+        # Fetch the AD Group and members within, including nested groups
+        $Group = Get-ADGroup -Identity $GroupName -Properties *
+        if ($Group -ne $null) {
+            # The -Recursive parameter is used to get members of nested groups
+            $GroupMembers = Get-ADGroupMember -Identity $Group -Recursive
+            $ADMemberArray = @()
 
-function UIDfetch {
-    param(
-        [Parameter(Mandatory)]
-        [array]$Usernames,
-        [Parameter(Mandatory)]
-        [string]$baseuri,
-        [Parameter(Mandatory)]
-        [hashtable]$headers
-    )
-    
-    $UIDArray = @()
-    foreach ($User in $Usernames) {
-        $global:searchuri = $baseuri + "api/people/lookup?searchText=$User&maxResults=1"
-        $TDXSearch = Invoke-RestMethod -Uri $searchuri -Method Get -Headers $headers
-        $UIDArray += $TDXSearch.uid
+            foreach ($Member in $GroupMembers) {
+                # Check if the member is a user
+                if ($Member.objectClass -eq 'user') {
+                    $ADMember = $Member.name + "@cmich.edu"
+                    $ADMemberArray += $ADMember
+                }
+            }
+            return $ADMemberArray
+        } else {
+            Write-Log "Group '$GroupName' not found."
+            return @()
+        }
     }
 
-    return $UIDArray
-}
+# Updates needed within TDXPull function
+# API Call to TDX to fetch group members
+    function TdxPull {
+    # This is currently pointed at the SB
+        $global:baseuri = "https://teamdynamix.com/SBTDWebApi/"
+        $authurl = $baseuri + "api/auth/loginadmin"
+    # Currently using LM-API Test API account for this test, be sure to update for Prod.
+    # BEID & WEBKEY val passed through Jenkins
+        $body = New-Object -TypeName psobject -Property @{
+            BEID=$env:BEID
+            WebServicesKey=$env:WEBKEY
+        } | ConvertTo-Json -Depth 2
+        $authResponse = Invoke-RestMethod -Uri $authurl -Method Post -Body $body -ContentType "application/json"
+        $bearerToken = $authResponse
+        # Headers must be set as global
+        $global:headers = @{
+            "Content-Type" = "application/json"
+            "Accept" = "application/json"
+            "Authorization" = "Bearer " + $bearerToken
+            }
+        $memberuri = $baseuri + "api/groups/$groupid/members"
+        $TDXResult = Invoke-RestMethod -Uri $memberuri -Method Get -Headers $headers
+        $tdxusers = $TDXResult | ForEach-Object { $_.Username }
 
-function RemoveUsers {
-    param(
-        [Parameter(Mandatory)]
-        [array]$UIDRemoveArray,
-        [Parameter(Mandatory)]
-        [string]$baseuri,
-        [Parameter(Mandatory)]
-        [string]$groupid,
-        [Parameter(Mandatory)]
-        [hashtable]$headers
-    )
-
-    $body = $null
-
-    if ($UIDRemoveArray.Count -eq 1) {
-        # Encapsulate the single UID in an array
-        $formattedRemoveUID = '["' + $($UIDRemoveArray -join '","') + '"]'  
-    } else {
-        # If not a single element, return the array as is
-        $formattedRemoveUID = $UIDRemoveArray | ConvertTo-Json
+        return $tdxusers
     }
 
-    $body = $formattedRemoveUID 
+# Powershell process to sort members to Add or Remove variables
+    function Sorting {
+            param(
+            [Parameter(Mandatory)]
+            [array]$tdxusers,
+            [Parameter(Mandatory)]
+            [array]$ADMemberarray
+        )
 
-    $Removeuri = $baseuri + "api/groups/$groupid/members"
+        # Comparing the results
+        $differences = Compare-Object -ReferenceObject $tdxusers -DifferenceObject $ADMemberarray
 
-    try {
-        $TDXRemove = Invoke-RestMethod -Uri $Removeuri -Method Delete -Headers $headers -Body $body
-    } catch {
-        Write-Log "Error: $($_.Exception.Message)" 
-    }
-}
+        # Determine who needs to be removed from the TDX group
+        $RemoveFrom = $differences | Where-Object { $_.SideIndicator -eq '<=' } | Select-Object -ExpandProperty InputObject
 
-function AddUsers {
-    param(
-        [Parameter(Mandatory)]
-        [array]$UIDAddArray,
-        [Parameter(Mandatory)]
-        [string]$baseuri,
-        [Parameter(Mandatory)]
-        [string]$groupID,
-        [Parameter(Mandatory)]
-        [hashtable]$headers
-    )
-    $body = $null
+        # Determine who needs to be added to the TDX group
+        $Add2TDX = $differences | Where-Object { $_.SideIndicator -eq '=>' } | Select-Object -ExpandProperty InputObject
 
-    if ($UIDAddArray.Count -eq 1) {
-        # Encapsulate the single UID in an array
-        $formattedAddUID = '["' + $($UIDAddArray -join '","') + '"]'  
-    } else {
-        # If not a single element, return the array as is
-        $formattedAddUID = $UIDAddArray | ConvertTo-Json
+        # Return the lists
+        return @{
+            RemoveFrom = $RemoveFrom
+            Add2TDX = $Add2TDX
+        }
     }
 
-    $body = $formattedAddUID 
-   
-    # Construct the URI for adding users to the TDX group
-    $Adduri = $baseuri + "api/groups/$groupID/members"
+# TDX ADD/REMOVE API calls wont accept GIDS, so here we fetch UID from TDX based on GID from AD
+    function UIDfetch {
+        param(
+            [Parameter(Mandatory)]
+            [array]$Usernames,
+            [Parameter(Mandatory)]
+            [string]$baseuri,
+            [Parameter(Mandatory)]
+            [hashtable]$headers
+        )
 
-    try {
-        # Invoke the API request to add users
-        $TDXAdd = Invoke-RestMethod -Uri $Adduri -Method Post -Headers $headers -Body $body
-        } catch {
-       Write-Log  "Error: $($_.Exception.Message)"
+        $UIDArray = @()
+        foreach ($User in $Usernames) {
+            $global:searchuri = $baseuri + "api/people/lookup?searchText=$User&maxResults=1"
+            $TDXSearch = Invoke-RestMethod -Uri $searchuri -Method Get -Headers $headers
+            $UIDArray += $TDXSearch.uid
+        }
+
+        return $UIDArray
     }
-}
+# API call to remove users from TDX Group
+    function RemoveUsers {
+        param(
+            [Parameter(Mandatory)]
+            [array]$UIDRemoveArray,
+            [Parameter(Mandatory)]
+            [string]$baseuri,
+            [Parameter(Mandatory)]
+            [string]$groupid,
+            [Parameter(Mandatory)]
+            [hashtable]$headers
+        )
+        # Clearing some values to avoid unintentionally stored values being passed during the looped process
+        $body = $null
+        $formattedRemoveUID = $null
 
-# TestSync clear variables and validate by repeating steps 1-3 of Main then checking for sorted results greater than 0 to determine $syncStatus
-function TestSync {
-    # Reset variables
-    $ADMemberarray = $null
-    $TDXResult = $null
-    $tdxusers = $null
-    $sortResult = $null
-    $differences = $null
-    $RemoveFrom = $null
-    $Add2TDX = $null
+        # Due to how Powershell handles arrays with only a single value, special formatting has to occur because otherwise, it is 'unboxed' and doesn't get properly converted to JSON for the API
+        if ($UIDRemoveArray.Count -eq 1) {
+            # Encapsulate the single UID in an array
+            $formattedRemoveUID = '["' + $($UIDRemoveArray -join '","') + '"]'  
+        } else {
+            # If not a single element, return the array as is
+            $formattedRemoveUID = $UIDRemoveArray | ConvertTo-Json
+        }
 
-    Write-Log "***Validating Sync***"
-    Write-Log ""
+        $body = $formattedRemoveUID 
+
+        # Construct the URI for removing users from the TDX Group
+        $Removeuri = $baseuri + "api/groups/$groupid/members"
 
         try {
-        # 1. Call ADPull to get AD group members
-        $ADMemberarray = ADPull -GroupName '$GroupName' -ErrorAction Stop
-
-        # 2. Call TdxPull to get TDX group members
-        $tdxusers = TdxPull -ErrorAction Stop
-
-        # 3. Call Sorting to compare AD and TDX members
-        $sortResult = Sorting -tdxusers $tdxusers -ADMemberarray $ADMemberarray -ErrorAction Stop
-
-        Write-Log "Post Sync Number of Users to remove from TDX: $($sortResult.RemoveFrom.Count)"
-        Write-Log "Post Sync Number of Users to Add to TDX Group: $($sortResult.Add2TDX.Count)"
-        Write-Log ""
-
-        #4. Check that there are no users to be added/removed
-        if ((-not $sortResult.RemoveFrom -or $sortResult.RemoveFrom.Count -eq 0) -and
-                (-not $sortResult.Add2TDX -or $sortResult.Add2TDX.Count -eq 0)) {
-                $syncStatus = $true
-
-                Write-Log "Success: No users to remove or add to TDX group."
-
-            } else {
-                $syncStatus = $false
-            if ($sortResult.RemoveFrom -and $sortResult.RemoveFrom.Count -gt 0) {
-                Write-Log "Failure: Issue with sync - Users to remove exist."
-            }
-            if ($sortResult.Add2TDX -and $sortResult.Add2TDX.Count -gt 0) {
-                Write-Log "Failure: Issue with sync - Users to add exist."
-            }
+            # Invoke the API request to remove users
+            $TDXRemove = Invoke-RestMethod -Uri $Removeuri -Method Delete -Headers $headers -Body $body
+        } catch {
+            Write-Log "Error: $($_.Exception.Message)" 
         }
-        return $syncStatus
-        Write-Log ""
-    } catch {
-        Write-Log "An error occurred in TestSync: $($_.Exception.Message)"
     }
-}
+# API call to remove users from TDX Group
+    function AddUsers {
+        param(
+            [Parameter(Mandatory)]
+            [array]$UIDAddArray,
+            [Parameter(Mandatory)]
+            [string]$baseuri,
+            [Parameter(Mandatory)]
+            [string]$groupID,
+            [Parameter(Mandatory)]
+            [hashtable]$headers
+        )
+        # Clearing some values to avoid unintentionally stored values being passed during the looped process
+        $body = $null
+        $formattedAddUID = $null
 
-#Main process
-try {
+        # Due to how Powershell handles arrays with only a single value, special formatting has to occur because otherwise, it is 'unboxed' and doesn't get properly converted to JSON for the API
+        if ($UIDAddArray.Count -eq 1) {
+            # Encapsulate the single UID in an array
+            $formattedAddUID = '["' + $($UIDAddArray -join '","') + '"]'  
+        } else {
+            # If not a single element, return the array as is
+            $formattedAddUID = $UIDAddArray | ConvertTo-Json
+        }
 
-    # 1. Call ADPull to get AD group members
-    $ADMemberarray = ADPull -GroupName '$GroupName' -ErrorAction Stop
-
-    Write-Log "Current AD Group Members: $($ADMemberarray.Count)"
-
-    # 2. Call TdxPull to get TDX group members
-    $tdxusers = TdxPull -ErrorAction Stop
-
-    Write-Log "Current TDXGroup Members: $($tdxusers.Count)"
-    Write-Log ""
+        $body = $formattedAddUID 
     
-    # 3. Call Sorting to compare AD and TDX members
-    $sortResult = Sorting -tdxusers $tdxusers -ADMemberarray $ADMemberarray -ErrorAction Stop
+        # Construct the URI for adding users to the TDX Group
+        $Adduri = $baseuri + "api/groups/$groupID/members"
 
-    # 4. Fetch UIDs for users to be removed from TDX group
-    $UIDRemoveArray = $null
-    if ($sortResult.RemoveFrom -and $sortResult.RemoveFrom.Count -gt 0) {
-        $UIDRemoveArray = UIDfetch -Usernames $sortResult.RemoveFrom -baseuri $baseuri -headers $headers -ErrorAction Stop
-
-        Write-Log "Number of Users to remove from TDX: $($UIDRemoveArray.Count)"
-
-    } else {
-
-        Write-Log "No users to remove from TDX group."
+        try {
+            # Invoke the API request to add users
+            $TDXAdd = Invoke-RestMethod -Uri $Adduri -Method Post -Headers $headers -Body $body
+            } catch {
+           Write-Log  "Error: $($_.Exception.Message)"
+        }
     }
-    # 5. Fetch UIDs for users to be added to TDX group
-    $UIDAddArray = $null
-    if ($sortResult.Add2TDX -and $sortResult.Add2TDX.Count -gt 0) {
-        $UIDAddArray = UIDfetch -Usernames $sortResult.Add2TDX -baseuri $baseuri -headers $headers -ErrorAction Stop
 
-        Write-Log "Number of Users to Add to TDX Group: $($UIDAddArray.count)"
+# TestSync clear variables and validate by repeating steps 1-3 of Main then checking for sorted results greater than 0 to determine $syncStatus
+    function TestSync {
+        
+        #region Reset variables to prevent false readings during the TestSync process
+        $ADMemberarray = $null
+        $TDXResult = $null
+        $tdxusers = $null
+        $sortResult = $null
+        $differences = $null
+        $RemoveFrom = $null
+        $Add2TDX = $null
+        #endregion
+
+        Write-Log ""
+        Write-Log "***Validating Sync***"
+        Write-Log ""
+
+            try {
+            # 1. Call ADPull to get AD group members
+            $ADMemberarray = ADPull -GroupName '$GroupName' -ErrorAction Stop
+
+            # 2. Call TdxPull to get TDX group members
+            $tdxusers = TdxPull -ErrorAction Stop
+
+            # 3. Call Sorting to compare AD and TDX members
+            $sortResult = Sorting -tdxusers $tdxusers -ADMemberarray $ADMemberarray -ErrorAction Stop
+
+            Write-Log "Post Sync Number of Users to remove from TDX: $($sortResult.RemoveFrom.Count)"
+            Write-Log "Post Sync Number of Users to Add to TDX Group: $($sortResult.Add2TDX.Count)"
+            Write-Log ""
+
+            #4. Check that there are no users to be added/removed
+            if ((-not $sortResult.RemoveFrom -or $sortResult.RemoveFrom.Count -eq 0) -and
+                    (-not $sortResult.Add2TDX -or $sortResult.Add2TDX.Count -eq 0)) {
+                    $syncStatus = $true
+
+                    Write-Log "Success: No users to remove or add to TDX group."
+
+                } else {
+                    $syncStatus = $false
+                if ($sortResult.RemoveFrom -and $sortResult.RemoveFrom.Count -gt 0) {
+                    Write-Log "Failure: Issue with sync - Users to remove exist."
+                }
+                if ($sortResult.Add2TDX -and $sortResult.Add2TDX.Count -gt 0) {
+                    Write-Log "Failure: Issue with sync - Users to add exist."
+                }
+            }
+            # Passing syncStatus value so the success or failure can be logged and notifications can be sent if needed
+            return $syncStatus
+            Write-Log ""
+        } catch {
+            Write-Log "An error occurred in TestSync: $($_.Exception.Message)"
+        }
+        # In step 3 of the main loop, if zero members are pulled from AD then the Flag gets set to 1, this is only to initate the error message below for better visibility.
+        if ($Flag -eq 1) {
+            Write-Log ""
+            Write-Log "No members in Active Directory $($GroupName), check spelling of group in $($csvPath), otherwise you might need to manually remove all group members in TDX."
+            Write-Log ""
+        }
+    }
+
+# Email functionality contained, to edit sender/destination change variables contained within Send-LogEmail.
+    function Send-LogEmail {
+       param(
+           [string]$LogFilePath  # Changed parameter to accept full file path
+       )
+       # Verifing log path so it can be attached to the failure email
+       $FullLogPath = Join-Path -Path $logDirPath -ChildPath $LogFileName
+
+       # Define fixed email parameters
+       $Subject = "TDX to AD Sync Failure Alert"
+       $Body = "The synchronization has failed. Please see the attached log."
+       $SmtpServer = "smtp.0365.com"
+       $From = "Notification@domain.com"
+       $To = "monitoringEmail@domain.com"
+
+       # Send the email
+       Send-MailMessage -SmtpServer $SmtpServer -From $From -To $To -Subject $Subject -Body $Body -Attachments $LogFilePath
+    } 
+#endregion
+
+#region Main Process
+
+#region Loop
+
+    # Clear the log file at the start of the script
+    if (Test-Path -Path $script:logFilePath) {
+        # This will clear the file if it exists
+        Clear-Content -Path $script:logFilePath
+    }
+
+    # Loop through each row in the Groups CSV
+    foreach ($row in $csvData) {
+        # Check if either value is missing or empty
+        if ([string]::IsNullOrWhiteSpace($row.ActiveDirectoryGroupName) -or [string]::IsNullOrWhiteSpace($row.TeamDynamicsGroupNumber)) {
+            Write-Log "Skipping incomplete row: AD Group Name - $($row.ActiveDirectoryGroupName), TDX Group ID - $($row.TeamDynamicsGroupNumber)"
+            continue
+        }
+
+        # Assign values to variables
+        $GroupName = $row.ActiveDirectoryGroupName
+        $groupid = $row.TeamDynamicsGroupNumber
+        Write-Log "Processing AD group: $GroupName with TDX GROUP ID: $groupid"
+
+            #region Sync process
+            Initialize-Logging -LogDirPath $logDirPath -LogFileName $logFileName
+            try {
             
-    } else {
+                # Reset variables
+                $ADMemberarray = $null
+                $TDXResult = $null
+                $tdxusers = $null
+                $sortResult = $null
+                $differences = $null
+                $RemoveFrom = $null
+                $Add2TDX = $null
+                $Flag = 0
+            
+                # 1. Call ADPull to get AD group members
+                $ADMemberarray = ADPull -GroupName '$GroupName' -ErrorAction Stop
+            
+                Write-Log "Current AD Group Members: $($ADMemberarray.Count)"
+            
+                # 2. Call TdxPull to get TDX group members
+                $tdxusers = TdxPull -ErrorAction Stop
+            
+                Write-Log "Current TDXGroup Members: $($tdxusers.Count)"
+                Write-Log ""
 
-        Write-Log "No users to add to TDX group."
+                # 3. Call Sorting to compare AD and TDX members
+                if ($ADMemberArray.count -eq 0) {
+                    Write-Log "No members in Active Directory $($GroupName), check spelling of group in $($csvPath), otherwise you might need to manually remove all group members in TDX."
+                    Write-Log ""
+                    # Setting $Flag eq to 1 to initiate the same error message in a friendlier location on the log just to improve visibility
+                    $Flag = 1
+                } elseif ($tdxusers.count -eq 0) {
+                    # Set $sortResult.RemoveFrom to $null and adjust $sortResult.Add2TDX, this is to push AD group members into an empty TDX group 
+                    $sortResult = New-Object PSObject -Property @{
+                        RemoveFrom = $null
+                        Add2TDX = $ADMemberarray
+                    }
+                } else {
+                    # If $tdxusers is not empty, proceed with normal sync functionality
+                    $sortResult = Sorting -tdxusers $tdxusers -ADMemberarray $ADMemberarray -ErrorAction Stop
+                }
+            
+                # 4. Fetch UIDs for users to be removed from TDX group
+                $UIDRemoveArray = $null
+                if ($sortResult.RemoveFrom -and $sortResult.RemoveFrom.Count -gt 0) {
+                    $UIDRemoveArray = UIDfetch -Usernames $sortResult.RemoveFrom -baseuri $baseuri -headers $headers -ErrorAction Stop
+                
+                    Write-Log "Number of Users to remove from TDX: $($UIDRemoveArray.Count)"
+                    Write-Log ($sortResult.RemoveFrom -join "`n")
+                
+                } else {
+                
+                    Write-Log "No users to remove from TDX group."
+                }
+                # 5. Fetch UIDs for users to be added to TDX group
+                $UIDAddArray = $null
+                if ($sortResult.Add2TDX -and $sortResult.Add2TDX.Count -gt 0) {
+                    $UIDAddArray = UIDfetch -Usernames $sortResult.Add2TDX -baseuri $baseuri -headers $headers -ErrorAction Stop
+                
+                    Write-Log "Number of Users to Add to TDX Group: $($UIDAddArray.count)"
+                    Write-Log ($sortResult.Add2TDX -join "`n")
+
+                } else {
+                
+                            Write-Log "No users to add to TDX group."
+                        }
+                        # 6. Call RemoveUsers (passing the UIDs) to remove users from TDX group
+                        if ($UIDRemoveArray -and $UIDRemoveArray.Count -gt 0) {
+                            RemoveUsers -UIDRemoveArray $UIDRemoveArray -baseuri $baseuri -groupid $groupid -headers $headers -ErrorAction Stop
+                        }
+                        else {
+                    
+                            Write-Log ""
+                        }
+                        # 7. Call AddUsers (passing the UIDs) to add users to TDX group
+                        if ($UIDAddArray -and $UIDAddArray.Count -gt 0) {
+                            AddUsers -UIDAddArray $UIDAddArray -baseuri $baseuri -groupID $groupid -headers $headers -ErrorAction Stop
+                        }
+                        else {
+                    
+                            Write-Log ""
+                        }
+            } catch {
+                        Write-Log "An error occurred: $($_.Exception.Message)"
+            }       
+            #endregion
+
+                #region Post Main validation
+                $syncStatus = TestSync
+                #endregion
+
+                    #region Final logging and wrap-up steps
+                    $endTimestamplog = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    Write-Log ""
+                    Write-Log "Sync ended at: $endTimestamplog"
+                    $endTimestampFN = Get-Date -Format "yyyy-MM-dd"
+                    $newLogFileName = if ($syncStatus) {
+                        "$($GroupName)_Sync_Success.txt"
+                    } else {
+                        "$($GroupName)_Sync_Failure.txt"
+                    }
+
+                    $newLogFilePath = [System.IO.Path]::Combine((Split-Path $logFilePath -Parent), $newLogFileName)
+
+                    # Rename the log file
+                    if (Test-Path -Path $newLogFilePath) {
+                        # If a file with the same name exists, delete or handle it
+                        Remove-Item -Path $newLogFilePath -Force
+                    }
+                    Rename-Item -Path $logFilePath -NewName $newLogFileName
+
+                    # Check sync status and send an email if there's a failure
+                    if (-not $syncStatus) {
+                        Send-LogEmail -LogFilePath $newLogFilePath
+                    }
+
+                    #endregion
     }
-    # 6. Call RemoveUsers (passing the UIDs) to remove users from TDX group
-    if ($UIDRemoveArray -and $UIDRemoveArray.Count -gt 0) {
-        RemoveUsers -UIDRemoveArray $UIDRemoveArray -baseuri $baseuri -groupid $groupid -headers $headers -ErrorAction Stop
-    }
-    else {
-
-        Write-Log ""
-    }
-    # 7. Call AddUsers (passing the UIDs) to add users to TDX group
-    if ($UIDAddArray -and $UIDAddArray.Count -gt 0) {
-        AddUsers -UIDAddArray $UIDAddArray -baseuri $baseuri -groupID $groupid -headers $headers -ErrorAction Stop
-    }
-    else {
-
-        Write-Log ""
-    }
-} catch {
-    Write-Log "An error occurred: $($_.Exception.Message)"
-}
-
-# Post Main process validation
-$syncStatus = TestSync
-
-# Final logging steps
-$endTimestamplog = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Write-Log ""
-Write-Log "Sync ended at: $endTimestamplog"
-
-$endTimestampFN = Get-Date -Format "yyyy-MM-dd"
-$newLogFileName = if ($syncStatus) {
-    "$($endTimestampFN)_Sync_Success.txt"
-} else {
-    "$($endTimestampFN)_Sync_Failure.txt"
-}
-$newLogFilePath = [System.IO.Path]::Combine((Split-Path $logFilePath -Parent), $newLogFileName)
-
-# Rename the log file
-if (Test-Path -Path $newLogFilePath) {
-    # If a file with the same name exists, delete or handle it
-    Remove-Item -Path $newLogFilePath -Force
-}
-Rename-Item -Path $logFilePath -NewName $newLogFileName
+#endregion
+#endregion

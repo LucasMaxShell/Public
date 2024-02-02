@@ -75,7 +75,7 @@
             foreach ($Member in $GroupMembers) {
                 # Check if the member is a user
                 if ($Member.objectClass -eq 'user') {
-                    $ADMember = $Member.name + "@cmich.edu"
+                    $ADMember = $Member.name + "@domain.com"
                     $ADMemberArray += $ADMember
                 }
             }
